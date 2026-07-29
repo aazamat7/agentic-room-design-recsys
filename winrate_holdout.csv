@@ -1,0 +1,7 @@
+room_type,lora_closer_clip_i,lora_closer_dino,lora_closer_lpips
+bathroom,1.0,1.0,1.0
+bedroom,0.6666666666666666,1.0,0.3333333333333333
+dining_room,1.0,0.0,1.0
+entryway,1.0,1.0,1.0
+kitchen,0.0,1.0,0.0
+living_room,0.3333333333333333,0.6666666666666666,0.6666666666666666
