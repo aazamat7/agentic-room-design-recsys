@@ -543,6 +543,8 @@ A single training pair, shown before the aggregate numbers. Both outputs were ge
 | **Overall** | **Claude** | **20 / 31** | **64.5%** | **46.9%–78.9%** | **0.0748** |
 | **Overall** | **Gemini** | **25 / 31** | **80.6%** | **63.7%–90.8%** | **0.0004** |
 
+![Blind judge win rates for the LoRA, with Wilson 95% intervals](results/judge_win_rates.png)
+
 The overall direction is favorable to the LoRA. Gemini provides strong evidence against the 50% null; Claude's pooled result is positive but does not cross the conventional 5% threshold. The holdout result is encouraging but based on only ten rooms.
 
 The two judges produced:
@@ -565,6 +567,8 @@ A metric win means the LoRA output is closer to the professional after-image tha
 | LPIPS target distance | 22 / 31 | 71.0% | 0.0147 |
 | Palette similarity | 16 / 31 | 51.6% | 0.5000 |
 
+![Target-reference metric win rates over 31 pairs](results/metric_win_rates.png)
+
 ### Paired mean changes
 
 | Metric | Base mean | LoRA mean | LoRA change | Interpretation |
@@ -585,6 +589,8 @@ No single reference metric tells the full story. A model can move closer to a ge
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Gemini 3.1 Flash Image | 5 / 5 | 0% | 13.04 s | 1.89 s | 0% | 0.5335 | 0.8219 |
 | Qwen-Image-Edit-2511 + LoRA endpoint | 5 / 5 | 0% | 65.44 s | 0.17 s | 100% | 1.0000 | 1.0000 |
+
+![LoRA endpoint against Gemini: determinism and latency](results/repeatability.png)
 
 Observed outputs:
 
