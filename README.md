@@ -1016,6 +1016,100 @@ A serious release test should use multiple unseen rooms and multiple prompts, no
 
 ---- 
 
+## Conclusion
+
+### RQ1 — Does the LoRA improve on the base model?
+
+**Yes, directionally, though the two judges do not agree on how strongly.**
+
+Gemini preferred the LoRA in 25 of 31 pairs (80.6%, one-sided p = 0.0004). Claude
+preferred it in 20 of 31 (64.5%, p = 0.0748) — positive, but short of the
+conventional threshold. Three of the four metrics reported in the win-rate table
+point the same way: CLIP-I and LPIPS at 71.0% (p = 0.0147) and DINOv2 at 67.7%
+(p = 0.0354). Palette similarity sits at chance.
+
+Raw inter-judge agreement was 71.0% with Cohen's kappa of 0.294. The two judges
+reach a similar aggregate on **different individual pairs**, which is why both are
+reported rather than averaged into one number. The effect is real; a single
+headline win rate would overstate it.
+
+### RQ2 — Is the deployed LoRA repeatable?
+
+**Yes, exactly.**
+
+Five identical requests under seed 42 returned byte-identical images: the same
+SHA-256 hash, mean pairwise SSIM of 1.0000, mean pHash similarity of 1.0000. Every
+Gemini call under the same conditions produced a different hash.
+
+This is an engineering property rather than an aesthetic one, and it is the
+strongest practical argument for self-hosting in this project. Deterministic
+output makes regression testing possible: a checkpoint or prompt change becomes a
+visible diff instead of a judgement call.
+
+### RQ3 — LoRA endpoint versus Gemini
+
+**Answered for stability and latency. Not answered for quality.**
+
+Gemini averaged 13.04 s (SD 1.89 s) against 65.44 s (SD 0.17 s) for the LoRA
+endpoint — roughly 5× slower in an unoptimised single-request deployment with no
+batching, compilation, or quantisation. Both systems completed all five calls.
+
+The blinded A/B sheets were generated but not rated, so **no quality win rate is
+claimed here.** Repeatability must not be read as evidence of better images.
+
+### RQ4 — Does retrieval improve preference discovery?
+
+**Not established.**
+
+The retrieval layer is implemented and operational — Gemini Embedding 2 against a
+deployed Vertex AI Vector Search index, plus a human-in-the-loop step where the
+user selects the reference rather than the agent choosing silently. But no
+ablation and no user study have been run, so nothing here constitutes causal
+evidence. Of the two strategic hypotheses stated at the top of this document, the
+first has preliminary support; **this one remains a hypothesis.**
+
+---
+
+### What the evaluation itself taught us
+
+The most transferable result of this project is not a win rate. It is a finding
+about the instruments.
+
+**The four metrics carried into the win-rate table measure distance to the
+designer's target, not fidelity to the user's original room.** CLIP-I, DINOv2,
+LPIPS, and palette all reward proximity to a professional after-image. The
+preservation signals — SSIM and DINO relative to the input — sit outside that
+table, and SSIM moves *against* the LoRA: 0.3393 → 0.3008. The adapter transforms
+more aggressively than the base model. That is what it was trained to do, and it
+is also the mechanism behind Limitations 5 and 6.
+
+**A paired win rate cannot see a failure that both models commit.** Each judge and
+each metric compares two candidates against the same reference. When the base and
+the LoRA drift the same way — a bathroom that both render toward a living-room
+template, per Limitation 6 — the error is present in both arms and cancels out of
+the comparison. The pair still yields a verdict, and that verdict is uninformative
+about the failure.
+
+The consequence generalises beyond room renovation: **on tasks where two systems
+fail in the same direction, paired win rates measure the wrong thing.** Absolute
+distances retain that signal where paired win rates discard it, which is why the
+two are reported side by side in this repository rather than merged.
+
+---
+
+### Overall
+
+A narrow, self-hosted LoRA delivers real task specialisation, exact
+reproducibility, and full control over checkpoint, seed, and inference settings.
+Gemini remains a faster and highly capable general-purpose baseline. Neither
+result settles image quality, because that comparison has not been rated.
+
+The strongest production system would likely combine domain retrieval and
+structured reasoning with a specialised generator, while evaluating quality,
+preservation, latency, and cost as **separate** axes rather than collapsing them
+into one score.
+
+---
 
 ## Data, licensing, and responsible use
 
