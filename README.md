@@ -528,6 +528,10 @@ This test measures **technical repeatability**, not broad quality or generalizat
 
 ## Results
 
+![Base Qwen versus LoRA on a training pair](results/pair_04d7b6_base_vs_lora.png)
+
+A single training pair, shown before the aggregate numbers. Both outputs were generated in one run with the same seed, step count and guidance, so the LoRA adapter is the only difference between the second and third columns. This pair is one of the strongest in the evaluation set — across all 31 pairs the metrics move against the LoRA on roughly a third of them.
+
 ## 1. Base Qwen versus LoRA: blind judge results
 
 | Split | Judge | LoRA wins | Win rate | Wilson 95% CI | One-sided p-value |
