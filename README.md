@@ -367,6 +367,8 @@ The application supports multiple initial-generation backends behind a shared in
 
 The dataset contains **106 professional before/after room-renovation pairs**. Each record includes the original room, redesigned room, room type, split, primary/secondary style, a natural-language style description, label confidence, and source URL.
 
+![Dataset sample — four before/after pairs](data/dataset_contact_sheet_4pairs.jpg)
+
 | Split | Independent room pairs | Augmentation | Purpose |
 |---|---:|---:|---|
 | Train | 96 | Original + 5 paired variants | LoRA training |
