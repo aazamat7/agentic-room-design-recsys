@@ -361,6 +361,25 @@ The application supports multiple initial-generation backends behind a shared in
 
 ---
 
+## The application
+
+![Three designer references matched to the uploaded room](docs/images/01-references.png)
+
+Upload one photo. No prompt, no style keywords. Three real finished rooms come back, and the one you pick sets the style.
+
+![Our fine-tuned model and the base model side by side](docs/images/02-comparison.png)
+
+Your room and your chosen reference go to both models, and both results come back on your own room.
+
+![Requesting a change in plain English](docs/images/03-edit-typed.png)
+
+Edits are typed in plain English and land on the room currently on screen.
+
+![The room after the change, with earlier versions kept below](docs/images/04-edit-typed.png)
+
+Every version is kept, so changes accumulate instead of resetting — and you can go back to any of them.
+
+---
 ## Dataset
 
 ### Composition
