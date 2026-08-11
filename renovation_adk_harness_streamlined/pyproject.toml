@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renovation-adk-harness"
+version = "0.1.0"
+description = "ADK harness for vector-reference room renovation with Gemini and Qwen"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = ["renovation_agent", "renovation_agent.services"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import uuid
+from datetime import timedelta
+from pathlib import Path
+
+import requests
+from google.cloud import storage
+
+from renovation_agent.config import Settings
+from renovation_agent.services.image_io import (
+    ImagePayload,
+    extension_for_mime,
+    load_image,
+    parse_gs_uri,
+)
+
+
+class GCSImageStore:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.client = storage.Client(project=settings.project_id)
+        self.bucket = self.client.bucket(settings.output_bucket)
+
+    def put_payload(self, payload: ImagePayload, project_key: str, kind: str) -> str:
+        ext = extension_for_mime(payload.mime_type)
+        object_name = (
+            f"{self.settings.output_prefix.strip('/')}/{project_key}/{kind}/"
+            f"{uuid.uuid4().hex}{ext}"
+        )
+        blob = self.bucket.blob(object_name)
+        blob.upload_from_string(payload.data, content_type=payload.mime_type)
+        return f"gs://{self.settings.output_bucket}/{object_name}"
+
+    def put_bytes(
+        self,
+        data: bytes,
+        mime_type: str,
+        project_key: str,
+        kind: str,
+    ) -> str:
+        payload = ImagePayload(
+            data=data,
+            mime_type=mime_type,
+            filename=f"output{extension_for_mime(mime_type)}",
+            source="generated",
+        )
+        return self.put_payload(payload, project_key, kind)
+
+    def stabilize_image(self, source: str, project_key: str, kind: str) -> str:
+        """Return a stable GCS URI, copying local/HTTP inputs into the output bucket."""
+        if source.startswith("gs://"):
+            # Validate access and format but do not make an unnecessary copy.
+            load_image(
+                source,
+                project_id=self.settings.project_id,
+                max_bytes=self.settings.max_image_bytes,
+            )
+            return source
+        payload = load_image(
+            source,
+            project_id=self.settings.project_id,
+            max_bytes=self.settings.max_image_bytes,
+        )
+        return self.put_payload(payload, project_key, kind)
+
+    def persist_generated_result(
+        self,
+        *,
+        project_key: str,
+        kind: str,
+        data: bytes | None = None,
+        mime_type: str | None = None,
+        uri: str | None = None,
+    ) -> str:
+        if data is not None:
+            return self.put_bytes(
+                data=data,
+                mime_type=mime_type or "image/png",
+                project_key=project_key,
+                kind=kind,
+            )
+        if not uri:
+            raise ValueError("Generated result did not contain image bytes or a URI")
+        if uri.startswith("gs://"):
+            return uri
+        payload = load_image(
+            uri,
+            project_id=self.settings.project_id,
+            max_bytes=self.settings.max_image_bytes,
+            timeout_seconds=self.settings.generation_timeout_seconds,
+        )
+        return self.put_payload(payload, project_key, kind)
+
+    def preview_url(self, gcs_or_http_uri: str | None) -> str | None:
+        if not gcs_or_http_uri:
+            return None
+        if gcs_or_http_uri.startswith(("http://", "https://")):
+            return gcs_or_http_uri
+        if not gcs_or_http_uri.startswith("gs://"):
+            path = Path(gcs_or_http_uri).expanduser()
+            return path.as_uri() if path.exists() else None
+
+        bucket_name, object_name = parse_gs_uri(gcs_or_http_uri)
+        blob = self.client.bucket(bucket_name).blob(object_name)
+        try:
+            return blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(minutes=self.settings.signed_url_ttl_minutes),
+                method="GET",
+            )
+        except Exception:
+            # This URL works only when the object is public. It is still more useful
+            # than silently dropping the preview, and the stable gs:// URI is retained.
+            return f"https://storage.googleapis.com/{bucket_name}/{object_name}"
+
+    def read_text(self, uri: str) -> str:
+        if uri.startswith("gs://"):
+            bucket_name, object_name = parse_gs_uri(uri)
+            return self.client.bucket(bucket_name).blob(object_name).download_as_text()
+        if uri.startswith(("http://", "https://")):
+            response = requests.get(uri, timeout=60)
+            response.raise_for_status()
+            return response.text
+        return Path(uri).expanduser().read_text(encoding="utf-8")

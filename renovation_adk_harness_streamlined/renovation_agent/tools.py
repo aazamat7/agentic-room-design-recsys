@@ -1,0 +1,651 @@
+from __future__ import annotations
+
+import asyncio
+import re
+import uuid
+from functools import lru_cache
+from typing import Any
+
+from google.adk.tools import ToolContext
+
+from renovation_agent.config import get_settings
+from renovation_agent.schemas import GenerationRecord, RenovationPlan
+from renovation_agent.services.gcs_store import GCSImageStore
+from renovation_agent.services.gemini_reasoner import (
+    GeminiRenovationReasoner,
+    compose_initial_qwen_prompt,
+    compose_iteration_prompt,
+)
+from renovation_agent.services.image_io import load_image
+from renovation_agent.services.qwen_backends import (
+    build_initial_backend,
+    build_initial_comparison_backend,
+    build_initial_fallback_backend,
+    build_iteration_backend,
+)
+from renovation_agent.services.vector_search import VectorSearchService
+
+
+PROJECT_STATE_KEYS = (
+    "project_id",
+    "stage",
+    "source_image_uri",
+    "source_preview_url",
+    "room_type",
+    "user_goal",
+    "reference_candidates",
+    "selected_reference",
+    "renovation_plan",
+    "initial_generation_prompt",
+    "current_image_uri",
+    "current_preview_url",
+    "generation_history",
+    "initial_comparison_outputs",
+)
+
+
+def _empty_project_state() -> dict[str, Any]:
+    """Fresh workflow values compatible with ADK's tracked State object."""
+    return {
+        "project_id": None,
+        "stage": "not_started",
+        "source_image_uri": None,
+        "source_preview_url": None,
+        "room_type": None,
+        "user_goal": None,
+        "reference_candidates": [],
+        "selected_reference": None,
+        "renovation_plan": None,
+        "initial_generation_prompt": None,
+        "current_image_uri": None,
+        "current_preview_url": None,
+        "generation_history": [],
+        "initial_comparison_outputs": None,
+    }
+
+
+def _reset_project_state(state: Any) -> None:
+    """Reset workflow keys through State.update; ADK State has no dict.pop()."""
+    state.update(_empty_project_state())
+
+
+@lru_cache(maxsize=1)
+def _store() -> GCSImageStore:
+    return GCSImageStore(get_settings())
+
+
+@lru_cache(maxsize=1)
+def _vector_service() -> VectorSearchService:
+    return VectorSearchService(get_settings())
+
+
+@lru_cache(maxsize=1)
+def _reasoner() -> GeminiRenovationReasoner:
+    return GeminiRenovationReasoner(get_settings())
+
+
+@lru_cache(maxsize=1)
+def _initial_backend():
+    return build_initial_backend(get_settings())
+
+
+@lru_cache(maxsize=1)
+def _initial_fallback_backend():
+    return build_initial_fallback_backend(get_settings())
+
+
+@lru_cache(maxsize=1)
+def _initial_comparison_backend():
+    return build_initial_comparison_backend(get_settings())
+
+
+@lru_cache(maxsize=1)
+def _iteration_backend():
+    return build_iteration_backend(get_settings())
+
+
+async def start_project(
+    image_path: str,
+    room_type: str,
+    user_goal: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Register a new source room image. Call this when the user supplies image_path, gs:// URI, or HTTPS image URL."""
+    settings = get_settings()
+    project_id = uuid.uuid4().hex
+    try:
+        stable_uri = await asyncio.to_thread(
+            _store().stabilize_image,
+            image_path,
+            project_id,
+            "source",
+        )
+        preview = await asyncio.to_thread(_store().preview_url, stable_uri)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Could not register the room image: {exc}",
+        }
+
+    _reset_project_state(tool_context.state)
+    tool_context.state["project_id"] = project_id
+    tool_context.state["stage"] = "photo_registered"
+    tool_context.state["source_image_uri"] = stable_uri
+    tool_context.state["source_preview_url"] = preview
+    tool_context.state["room_type"] = room_type.strip() or "living_room"
+    tool_context.state["user_goal"] = user_goal.strip()
+    tool_context.state["generation_history"] = []
+    return {
+        "status": "success",
+        "project_id": project_id,
+        "stage": "photo_registered",
+        "source_image_uri": stable_uri,
+        "source_preview_url": preview,
+        "next_action": "Call search_references with num_neighbors=3.",
+    }
+
+
+async def search_references(
+    num_neighbors: int,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Embed the registered room with Gemini Embedding 2 and retrieve the nearest renovated rooms from Vertex AI Vector Search."""
+    source_uri = tool_context.state.get("source_image_uri")
+    if not source_uri:
+        return {
+            "status": "error",
+            "message": "No source room is registered. Call start_project first.",
+        }
+    try:
+        candidates = await asyncio.to_thread(
+            _vector_service().search,
+            source_uri,
+            num_neighbors,
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Vector reference search failed: {exc}",
+        }
+
+    room_type = tool_context.state.get("room_type")
+    if room_type:
+        same = [c for c in candidates if getattr(c, "room_type", None) == room_type]
+        if len(same) >= 3:
+            candidates = same[:3]
+    serialized = [candidate.model_dump(mode="json") for candidate in candidates]
+    tool_context.state["reference_candidates"] = serialized
+    tool_context.state["stage"] = "references_ready"
+    missing_images = [c["reference_id"] for c in serialized if not c.get("image_uri")]
+    return {
+        "status": "success",
+        "stage": "references_ready",
+        "candidates": serialized,
+        "warning": (
+            "Some datapoint IDs have no image mapping. Set VECTOR_METADATA_URI to the metadata "
+            f"sidecar for: {missing_images}"
+            if missing_images
+            else None
+        ),
+        "instruction": "Present the candidates as 1, 2, and 3 and wait for the user to choose.",
+    }
+
+
+async def select_reference(
+    selection: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Select one of the retrieved references by rank (1/2/3) or by exact reference ID."""
+    candidates = tool_context.state.get("reference_candidates") or []
+    if not candidates:
+        return {
+            "status": "error",
+            "message": "No reference candidates are available. Call search_references first.",
+        }
+
+    selected: dict[str, Any] | None = None
+    clean = selection.strip()
+    rank_match = re.search(r"\b(\d+)\b", clean)
+    if rank_match:
+        rank = int(rank_match.group(1))
+        selected = next((c for c in candidates if int(c.get("rank", -1)) == rank), None)
+    if selected is None:
+        selected = next(
+            (c for c in candidates if str(c.get("reference_id")) == clean), None
+        )
+    if selected is None:
+        return {
+            "status": "error",
+            "message": f"Selection {selection!r} does not match the available references.",
+            "available": [
+                {"rank": c.get("rank"), "reference_id": c.get("reference_id")}
+                for c in candidates
+            ],
+        }
+    if not selected.get("image_uri"):
+        return {
+            "status": "error",
+            "message": (
+                "The selected Vector Search datapoint has no mapped reference image. "
+                "Set VECTOR_METADATA_URI to a JSONL/CSV sidecar that maps datapoint IDs to image URIs."
+            ),
+        }
+
+    tool_context.state["selected_reference"] = selected
+    tool_context.state["stage"] = "reference_selected"
+    tool_context.state["renovation_plan"] = None
+    return {
+        "status": "success",
+        "stage": "reference_selected",
+        "selected_reference": selected,
+        "next_action": "Call create_renovation_plan, then render_renovation.",
+    }
+
+
+async def create_renovation_plan(
+    user_notes: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Use Gemini 3.1 Pro reasoning over the source room and selected reference to create a structured design and Qwen edit plan."""
+    source_uri = tool_context.state.get("source_image_uri")
+    selected = tool_context.state.get("selected_reference") or {}
+    reference_uri = selected.get("image_uri")
+    if not source_uri or not reference_uri:
+        return {
+            "status": "error",
+            "message": "A source image and selected reference are required.",
+        }
+
+    settings = get_settings()
+    try:
+        source, reference = await asyncio.gather(
+            asyncio.to_thread(
+                load_image,
+                source_uri,
+                project_id=settings.project_id,
+                max_bytes=settings.max_image_bytes,
+            ),
+            asyncio.to_thread(
+                load_image,
+                reference_uri,
+                project_id=settings.project_id,
+                max_bytes=settings.max_image_bytes,
+            ),
+        )
+        plan = await asyncio.to_thread(
+            _reasoner().create_plan,
+            source=source,
+            reference=reference,
+            user_goal=tool_context.state.get("user_goal", ""),
+            user_notes=user_notes,
+            room_type=tool_context.state.get("room_type", "living_room"),
+            prior_history=tool_context.state.get("generation_history", []),
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Gemini design reasoning failed: {exc}",
+        }
+
+    serialized = plan.model_dump(mode="json")
+    tool_context.state["renovation_plan"] = serialized
+    tool_context.state["stage"] = "plan_ready"
+    return {
+        "status": "success",
+        "stage": "plan_ready",
+        "plan": serialized,
+        "next_action": "Call render_renovation using the configured initial generation backend.",
+    }
+
+
+async def render_renovation(
+    seed: int,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Generate the first renovated image from the original room using the configured initial backend (Qwen+LoRA or Gemini Flash Image)."""
+    settings = get_settings()
+    source_uri = tool_context.state.get("source_image_uri")
+    selected = tool_context.state.get("selected_reference") or {}
+    reference_uri = selected.get("image_uri")
+    plan_raw = tool_context.state.get("renovation_plan")
+    if not source_uri or not reference_uri or not plan_raw:
+        return {
+            "status": "error",
+            "message": "Source image, selected reference, and renovation plan are required.",
+        }
+
+    plan = RenovationPlan.model_validate(plan_raw)
+    prompt = compose_initial_qwen_prompt(
+        settings,
+        plan,
+        tool_context.state.get("user_goal", ""),
+    )
+    project_id = tool_context.state.get("project_id") or uuid.uuid4().hex
+    try:
+        source, reference = await asyncio.gather(
+            asyncio.to_thread(
+                load_image,
+                source_uri,
+                project_id=settings.project_id,
+                max_bytes=settings.max_image_bytes,
+            ),
+            asyncio.to_thread(
+                load_image,
+                reference_uri,
+                project_id=settings.project_id,
+                max_bytes=settings.max_image_bytes,
+            ),
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Could not load the source or selected reference image: {exc}",
+        }
+
+    fallback_used = False
+    primary_error: str | None = None
+    result = None
+
+    try:
+        result = await asyncio.to_thread(
+            _initial_backend().generate,
+            source=source,
+            reference=reference,
+            prompt=prompt,
+            seed=seed,
+        )
+    except Exception as exc:
+        primary_error = str(exc)
+        fallback_backend = _initial_fallback_backend()
+        if fallback_backend is None:
+            return {
+                "status": "error",
+                "message": f"Initial generation failed and no fallback is enabled: {exc}",
+            }
+        try:
+            result = await asyncio.to_thread(
+                fallback_backend.generate,
+                source=source,
+                reference=reference,
+                prompt=prompt,
+                seed=seed,
+            )
+            fallback_used = True
+        except Exception as fallback_exc:
+            return {
+                "status": "error",
+                "message": (
+                    "Initial generation failed for both the configured Qwen+LoRA backend "
+                    f"and the Gemini image fallback. Primary error: {exc}. "
+                    f"Fallback error: {fallback_exc}"
+                ),
+            }
+
+    try:
+        output_uri = await asyncio.to_thread(
+            _store().persist_generated_result,
+            project_key=project_id,
+            kind="initial",
+            data=result.data,
+            mime_type=result.mime_type,
+            uri=result.uri,
+        )
+        preview = await asyncio.to_thread(_store().preview_url, output_uri)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Initial image generation succeeded but persistence failed: {exc}",
+        }
+
+    generation_step = (
+        "initial_gemini_fallback_generation"
+        if fallback_used
+        else "initial_lora_generation"
+    )
+    metadata = dict(result.raw_metadata or {})
+    if fallback_used:
+        metadata.update(
+            {
+                "fallback_used": True,
+                "fallback_model": result.model,
+                "primary_backend_error": primary_error,
+            }
+        )
+
+    # Optional A/B comparison. The comparison never replaces the LoRA result:
+    # output_uri/current_image_uri remain the primary LoRA image.
+    comparison_outputs = None
+    comparison_warning = None
+    comparison_backend = _initial_comparison_backend()
+    if comparison_backend is not None and not fallback_used:
+        try:
+            gemini_result = await asyncio.to_thread(
+                comparison_backend.generate,
+                source=source,
+                reference=reference,
+                prompt=prompt,
+                seed=seed,
+            )
+            gemini_output_uri = await asyncio.to_thread(
+                _store().persist_generated_result,
+                project_key=project_id,
+                kind="initial_gemini_comparison",
+                data=gemini_result.data,
+                mime_type=gemini_result.mime_type,
+                uri=gemini_result.uri,
+            )
+            gemini_preview = await asyncio.to_thread(
+                _store().preview_url,
+                gemini_output_uri,
+            )
+            comparison_outputs = {
+                "default_backend": "lora",
+                "lora": {
+                    "output_uri": output_uri,
+                    "preview_url": preview,
+                    "model": result.model,
+                },
+                "gemini": {
+                    "output_uri": gemini_output_uri,
+                    "preview_url": gemini_preview,
+                    "model": gemini_result.model,
+                },
+            }
+        except Exception as exc:
+            comparison_warning = f"Gemini comparison generation failed: {exc}"
+
+    tool_context.state["initial_comparison_outputs"] = comparison_outputs
+
+    record = GenerationRecord(
+        step=generation_step,
+        prompt=prompt,
+        output_uri=output_uri,
+        preview_url=preview,
+        seed=seed,
+        model=result.model,
+        metadata=metadata,
+    ).model_dump(mode="json")
+    history = list(tool_context.state.get("generation_history", []))
+    history.append(record)
+    if comparison_outputs:
+        history.append(
+            GenerationRecord(
+                step="initial_gemini_comparison",
+                prompt=prompt,
+                output_uri=comparison_outputs["gemini"]["output_uri"],
+                preview_url=comparison_outputs["gemini"]["preview_url"],
+                seed=seed,
+                model=comparison_outputs["gemini"]["model"],
+                metadata={"active_result": False, "comparison_only": True},
+            ).model_dump(mode="json")
+        )
+    tool_context.state["generation_history"] = history[-50:]
+    tool_context.state["initial_generation_prompt"] = prompt
+    tool_context.state["current_image_uri"] = output_uri
+    tool_context.state["current_preview_url"] = preview
+    tool_context.state["stage"] = "generated"
+    return {
+        "status": "success",
+        "stage": "generated",
+        "output_uri": output_uri,
+        "preview_url": preview,
+        "model": result.model,
+        "generation_backend": result.model,
+        "fallback_used": fallback_used,
+        "fallback_reason": primary_error,
+        "design_summary": plan.design_summary,
+        "comparison_outputs": comparison_outputs,
+        "comparison_warning": comparison_warning,
+        "instruction": (
+            "Show the LoRA result as the default/current image. If "
+            "comparison_outputs exists, also show the Gemini image as a "
+            "comparison, but keep LoRA active for later edits."
+        ),
+    }
+
+
+async def iterate_renovation(
+    edit_request: str,
+    seed: int,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Apply a follow-up delta to the latest generated room using the Qwen Replicate image-edit API."""
+    settings = get_settings()
+    current_uri = tool_context.state.get("current_image_uri")
+    if not current_uri:
+        return {
+            "status": "error",
+            "message": "There is no generated room to iterate. Complete the initial generation first.",
+        }
+    if not edit_request.strip():
+        return {"status": "error", "message": "The edit request is empty."}
+
+    selected = tool_context.state.get("selected_reference") or {}
+    reference_uri = selected.get("image_uri")
+    plan_raw = tool_context.state.get("renovation_plan")
+    plan = RenovationPlan.model_validate(plan_raw) if plan_raw else None
+    prompt = compose_iteration_prompt(settings, plan, edit_request.strip())
+    project_id = tool_context.state.get("project_id") or uuid.uuid4().hex
+
+    try:
+        current = await asyncio.to_thread(
+            load_image,
+            current_uri,
+            project_id=settings.project_id,
+            max_bytes=settings.max_image_bytes,
+        )
+        reference = None
+        if reference_uri and settings.replicate_iteration_reference_field:
+            reference = await asyncio.to_thread(
+                load_image,
+                reference_uri,
+                project_id=settings.project_id,
+                max_bytes=settings.max_image_bytes,
+            )
+        result = await asyncio.to_thread(
+            _iteration_backend().generate,
+            source=current,
+            reference=reference,
+            prompt=prompt,
+            seed=seed,
+        )
+        output_uri = await asyncio.to_thread(
+            _store().persist_generated_result,
+            project_key=project_id,
+            kind="iterations",
+            data=result.data,
+            mime_type=result.mime_type,
+            uri=result.uri,
+        )
+        preview = await asyncio.to_thread(_store().preview_url, output_uri)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Qwen Replicate iteration failed: {exc}",
+        }
+
+    record = GenerationRecord(
+        step="replicate_iteration",
+        prompt=prompt,
+        output_uri=output_uri,
+        preview_url=preview,
+        seed=seed,
+        model=result.model,
+        metadata={"user_edit_request": edit_request, **(result.raw_metadata or {})},
+    ).model_dump(mode="json")
+    history = list(tool_context.state.get("generation_history", []))
+    history.append(record)
+    tool_context.state["generation_history"] = history[-50:]
+    tool_context.state["current_image_uri"] = output_uri
+    tool_context.state["current_preview_url"] = preview
+    tool_context.state["stage"] = "iterating"
+    return {
+        "status": "success",
+        "stage": "iterating",
+        "output_uri": output_uri,
+        "preview_url": preview,
+        "model": result.model,
+        "applied_edit": edit_request,
+    }
+
+
+async def show_project_status(tool_context: ToolContext) -> dict[str, Any]:
+    """Return the current project stage, source, references, selected reference, plan, latest output, and edit history."""
+    source_uri = tool_context.state.get("source_image_uri")
+    current_uri = tool_context.state.get("current_image_uri")
+    selected = tool_context.state.get("selected_reference")
+    candidates = list(tool_context.state.get("reference_candidates", []))
+
+    # Refresh preview URLs because signed URLs may have expired.
+    if source_uri:
+        tool_context.state["source_preview_url"] = await asyncio.to_thread(
+            _store().preview_url, source_uri
+        )
+    if current_uri:
+        tool_context.state["current_preview_url"] = await asyncio.to_thread(
+            _store().preview_url, current_uri
+        )
+    for candidate in candidates:
+        if candidate.get("image_uri"):
+            candidate["preview_url"] = await asyncio.to_thread(
+                _store().preview_url, candidate["image_uri"]
+            )
+    tool_context.state["reference_candidates"] = candidates
+
+    return {
+        "status": "success",
+        "project_id": tool_context.state.get("project_id"),
+        "stage": tool_context.state.get("stage", "not_started"),
+        "source_image_uri": source_uri,
+        "source_preview_url": tool_context.state.get("source_preview_url"),
+        "reference_candidates": candidates,
+        "selected_reference": selected,
+        "renovation_plan": tool_context.state.get("renovation_plan"),
+        "current_image_uri": current_uri,
+        "current_preview_url": tool_context.state.get("current_preview_url"),
+        "generation_history": tool_context.state.get("generation_history", []),
+        "initial_comparison_outputs": tool_context.state.get(
+            "initial_comparison_outputs"
+        ),
+    }
+
+
+async def reset_project(tool_context: ToolContext) -> dict[str, Any]:
+    """Clear the active room-renovation project so the user can upload a different room."""
+    _reset_project_state(tool_context.state)
+    return {
+        "status": "success",
+        "stage": "not_started",
+        "message": "The active project was cleared. Ask for a new image_path or gs:// URI.",
+    }
+
+async def set_current_image(
+    image_uri: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Set the current room image for follow-up edits. Call this when the user
+    supplies an HTTPS image URL that should be refined directly."""
+    if not image_uri.strip():
+        return {"status": "error", "message": "image_uri is empty."}
+    tool_context.state["current_image_uri"] = image_uri.strip()
+    return {"status": "ok", "current_image_uri": image_uri.strip()}
