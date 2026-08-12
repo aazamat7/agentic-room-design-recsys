@@ -672,7 +672,6 @@ eval/
   evaluate_comparisons.py              blind Claude + Gemini judging
   build_tables.py                      win rates and statistical tables
   make_report.py                       side-by-side figures and report
-  eval_analysis.py                     standalone result analysis
 
 results/
   per_pair_full.csv                    all objective metrics for 31 pairs
@@ -694,7 +693,7 @@ LICENSE
 
 ### Deployable ADK runtime
 
-The application runtime is maintained as a separate `shopping_agent_v2` package and can be incorporated into this repository under an `app/` or `runtime/` directory.
+The application runtime lives in renovation_adk_harness_streamlined/.
 
 ```text
 renovation_adk_harness_streamlined/
@@ -732,7 +731,7 @@ renovation_adk_harness_streamlined/
 
 ## Quick start
 
-## A. Research repository
+### A. Research repository
 
 ```bash
 git clone https://github.com/aazamat7/agentic-room-design-recsys.git
@@ -757,13 +756,12 @@ The script performs base and LoRA passes in one process with identical inference
 ```bash
 python eval/evaluate_comparisons.py
 python eval/build_tables.py
-python eval/eval_analysis.py
 python eval/make_report.py
 ```
 
 Review each script's arguments and environment variables before running paid model judges.
 
-## B. Start the production LoRA endpoint
+### B. Start the production LoRA endpoint
 
 Run this in the Python environment that already contains the working DiffSynth installation:
 
@@ -808,7 +806,7 @@ curl -sS \
   -o /tmp/lora_api_test.png
 ```
 
-## C. Start the ADK application
+### C. Start the ADK application
 
 ```bash
 cd /path/to/renovation_adk_harness_streamlined
