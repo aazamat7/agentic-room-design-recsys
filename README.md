@@ -46,7 +46,6 @@ The work combines two complementary artifacts:
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Limitations](#limitations)
-- [Roadmap](#roadmap)
 - [Data, licensing, and responsible use](#data-licensing-and-responsible-use)
 - [References](#references)
 
@@ -553,7 +552,7 @@ This test measures **technical repeatability**, not broad quality or generalizat
 
 A single training pair, shown before the aggregate numbers. Both outputs were generated in one run with the same seed, step count and guidance, so the LoRA adapter is the only difference between the second and third columns. This pair is one of the strongest in the evaluation set — across all 31 pairs the metrics move against the LoRA on roughly a third of them.
 
-## 1. Base Qwen versus LoRA: blind judge results
+### 1. Base Qwen versus LoRA: blind judge results
 
 | Split | Judge | LoRA wins | Win rate | Wilson 95% CI | One-sided p-value |
 |---|---|---:|---:|---:|---:|
@@ -577,7 +576,7 @@ The two judges produced:
 
 The 62 judge votes are not 62 independent room observations because both judges scored the same 31 pairs.
 
-## 2. Target-reference metric win rates
+### 2. Target-reference metric win rates
 
 A metric win means the LoRA output is closer to the professional after-image than the base output.
 
@@ -602,7 +601,7 @@ A metric win means the LoRA output is closer to the professional after-image tha
 
 No single reference metric tells the full story. A model can move closer to a generic professional target while changing the room type or architecture incorrectly.
 
-## 3. Deployed LoRA endpoint versus Gemini: repeatability and latency
+### 3. Deployed LoRA endpoint versus Gemini: repeatability and latency
 
 **Scope:** one input room, one prompt, five calls per system. This is an engineering smoke test, not a final model-quality benchmark.
 
@@ -1033,7 +1032,7 @@ A serious release test should use multiple unseen rooms and multiple prompts, no
 14. **Retrieval value is not yet causal evidence.** The vector layer is operational, but no randomized user study has established uplift in acceptance or satisfaction.
 15. **Rights and privacy.** Editorial images and user-uploaded home photos require careful licensing, access control, retention, and deletion policies.
 
----- 
+--- 
 
 ## Conclusion
 
