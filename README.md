@@ -36,6 +36,7 @@ The work combines two complementary artifacts:
 - [System architecture](#system-architecture)
 - [Agent workflow and state machine](#agent-workflow-and-state-machine)
 - [Component design](#component-design)
+- [The application](#the-application)
 - [Dataset](#dataset)
 - [Training methodology](#training-methodology)
 - [Evaluation methodology](#evaluation-methodology)
@@ -46,8 +47,11 @@ The work combines two complementary artifacts:
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Limitations](#limitations)
+- [Conclusion](#conclusion)
 - [Data, licensing, and responsible use](#data-licensing-and-responsible-use)
 - [References](#references)
+- [Citation](#citation)
+- [License](#license)
 
 ---
 
@@ -693,7 +697,7 @@ LICENSE
 
 ### Deployable ADK runtime
 
-The application runtime lives in renovation_adk_harness_streamlined/.
+The application runtime lives in `renovation_adk_harness_streamlined/`.
 
 ```text
 renovation_adk_harness_streamlined/
